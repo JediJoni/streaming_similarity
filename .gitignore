@@ -1,0 +1,17 @@
+# Python / venv
+.venv/
+__pycache__/
+*.pyc
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+
+# Outputs / data (choose your policy)
+outputs/
+data/processed/
+
+# Keep raw data if small & allowed; otherwise ignore:
+# data/raw/
