@@ -1,160 +1,145 @@
+# src/data/build_catalog.py
 from __future__ import annotations
 
-import re
-import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
-
-import numpy as np
+import hashlib
+import re
 import pandas as pd
 
 
-# ---------- helpers ----------
-_SPLIT_RE = re.compile(r"\s*,\s*")
-
-
-def _split_list(s: object) -> list[str]:
-    """Split comma-separated strings into a clean list; return [] for missing."""
-    if s is None or (isinstance(s, float) and np.isnan(s)):
-        return []
-    s = str(s).strip()
-    if not s:
-        return []
-    return [x.strip() for x in _SPLIT_RE.split(s) if x.strip()]
-
-
-def _norm_token(x: str) -> str:
-    """Light normalization for tokens."""
-    x = x.strip()
-    x = re.sub(r"\s+", " ", x)
-    return x
-
-
-def _make_title_id(platform: str, title: str, release_year: int | float, type_: str) -> str:
-    key = f"{platform}|{title}|{int(release_year) if pd.notna(release_year) else 'NA'}|{type_}"
-    return hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
-
-
-def _parse_duration(type_series: pd.Series, duration_series: pd.Series) -> tuple[pd.Series, pd.Series]:
-    """
-    Returns (duration_mins, duration_seasons)
-    - For Movies: minutes parsed from '90 min'
-    - For TV Shows: seasons parsed from '2 Seasons'
-    """
-    duration_mins = pd.Series([np.nan] * len(duration_series), index=duration_series.index, dtype="float64")
-    duration_seasons = pd.Series([np.nan] * len(duration_series), index=duration_series.index, dtype="float64")
-
-    s = duration_series.fillna("").astype(str).str.lower().str.strip()
-    is_movie = type_series.fillna("").astype(str).str.lower().eq("movie")
-    is_tv = type_series.fillna("").astype(str).str.lower().str.contains("tv")
-
-    mins = s.str.extract(r"(\d+)\s*min")[0]
-    seasons = s.str.extract(r"(\d+)\s*season")[0]
-
-    duration_mins.loc[is_movie] = pd.to_numeric(mins.loc[is_movie], errors="coerce")
-    duration_seasons.loc[is_tv] = pd.to_numeric(seasons.loc[is_tv], errors="coerce")
-
-    return duration_mins, duration_seasons
-
-
-# ---------- main build ----------
-REQUIRED_COLS = {
-    "type",
-    "title",
-    "release_year",
-    "duration",
-    "listed_in",
-    "country",
-    "cast",
+PLATFORM_FILES = {
+    "Amazon Prime": "amazon_prime_titles.csv",
+    "Disney+": "disney_plus_titles.csv",
+    "Netflix": "netflix_titles.csv",
 }
 
-CANON_COLS = [
-    "title_id",
-    "platform",
-    "title",
-    "type",
-    "release_year",
-    "duration",
-    "duration_mins",
-    "duration_seasons",
-    "listed_in",
-    "country",
-    "cast",
-    # processed
-    "genres",
-    "countries",
-    "cast_list",
-    "n_genres",
-    "n_countries",
-    "n_cast",
+REQUIRED_RAW_COLS = [
+    "title", "type", "release_year", "duration", "listed_in", "country", "cast"
 ]
 
 
-def standardize_platform_df(df: pd.DataFrame, platform: str) -> pd.DataFrame:
-    """Standardize a raw platform df into canonical schema + parsed lists."""
-    missing = REQUIRED_COLS - set(df.columns)
-    if missing:
-        raise ValueError(f"{platform}: missing required columns: {sorted(missing)}")
+def load_raw_csvs(raw_dir: Path) -> dict[str, pd.DataFrame]:
+    """Load platform CSVs from data/raw into a dict[platform] -> DataFrame."""
+    raw_dir = Path(raw_dir)
+    dfs: dict[str, pd.DataFrame] = {}
 
-    out = df.copy()
+    for platform, filename in PLATFORM_FILES.items():
+        path = raw_dir / filename
+        if not path.exists():
+            raise FileNotFoundError(f"Missing file for {platform}: {path}")
 
-    # basic fields
-    out["platform"] = platform
-    out["title"] = out["title"].astype(str).str.strip()
-    out["type"] = out["type"].astype(str).str.strip()
-    out["release_year"] = pd.to_numeric(out["release_year"], errors="coerce")
-    out["duration"] = out["duration"]
+        df = pd.read_csv(path)
+        df["platform"] = platform
+        dfs[platform] = df
 
-    # parse duration
-    dur_mins, dur_seasons = _parse_duration(out["type"], out["duration"])
-    out["duration_mins"] = dur_mins
-    out["duration_seasons"] = dur_seasons
+    return dfs
 
-    # parsed lists
-    out["genres"] = out["listed_in"].apply(_split_list).apply(lambda xs: [_norm_token(x) for x in xs])
-    out["countries"] = out["country"].apply(_split_list).apply(lambda xs: [_norm_token(x) for x in xs])
-    out["cast_list"] = out["cast"].apply(_split_list).apply(lambda xs: [_norm_token(x) for x in xs])
 
-    out["n_genres"] = out["genres"].apply(len)
-    out["n_countries"] = out["countries"].apply(len)
-    out["n_cast"] = out["cast_list"].apply(len)
+# ---------- parsing helpers ----------
 
-    # title_id
-    out["title_id"] = [
-        _make_title_id(platform, t, y, ty) for t, y, ty in zip(out["title"], out["release_year"], out["type"])
-    ]
+def _split_multi(value: object) -> list[str]:
+    """Split comma-separated strings to normalized list[str]."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return []
+    s = str(value).strip()
+    if not s:
+        return []
+    parts = [p.strip() for p in s.split(",")]
+    # normalize spacing/casing lightly (keep original words, just trim)
+    return [p for p in parts if p]
 
-    # keep only canonical columns
-    out = out[CANON_COLS]
 
-    # drop obvious junk rows
-    out = out.dropna(subset=["title", "type"]).reset_index(drop=True)
-    return out
+_DURATION_RE = re.compile(r"^\s*(\d+)\s*(min|mins|minute|minutes|season|seasons)\s*$", re.I)
+
+def _parse_duration(duration: object) -> tuple[int | None, int | None]:
+    """
+    Return (duration_mins, duration_seasons) from raw duration field.
+    Examples:
+      "90 min" -> (90, None)
+      "2 Seasons" -> (None, 2)
+    """
+    if duration is None or (isinstance(duration, float) and pd.isna(duration)):
+        return None, None
+    s = str(duration).strip()
+    if not s:
+        return None, None
+
+    m = _DURATION_RE.match(s)
+    if not m:
+        return None, None
+
+    n = int(m.group(1))
+    unit = m.group(2).lower()
+    if "season" in unit:
+        return None, n
+    return n, None
+
+
+def _stable_title_id(platform: str, title: str, release_year: int | None, type_: str) -> str:
+    """Deterministic ID from key fields; stable across runs."""
+    key = f"{platform}|{title}|{release_year}|{type_}"
+    return hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
 
 
 def build_catalog(platform_dfs: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Combine standardized dfs into a single canonical catalog."""
-    parts = []
+    """
+    Build canonical catalog with:
+      required raw cols + processed cols (genres, countries, cast_list, duration_mins, duration_seasons, title_id)
+    """
+    frames = []
     for platform, df in platform_dfs.items():
-        parts.append(standardize_platform_df(df, platform))
-    catalog = pd.concat(parts, ignore_index=True)
+        df = df.copy()
 
-    # optional: dedupe within platform on title_id (should already be stable)
-    catalog = catalog.drop_duplicates(subset=["platform", "title_id"]).reset_index(drop=True)
+        # Standardize column names if needed (datasets usually already match)
+        # Ensure required columns exist
+        missing = [c for c in REQUIRED_RAW_COLS if c not in df.columns]
+        if missing:
+            raise ValueError(f"{platform} missing columns: {missing}")
+
+        # Enforce types
+        df["release_year"] = pd.to_numeric(df["release_year"], errors="coerce").astype("Int64")
+
+        # Parse duration
+        parsed = df["duration"].apply(_parse_duration)
+        df["duration_mins"] = [x[0] for x in parsed]
+        df["duration_seasons"] = [x[1] for x in parsed]
+
+        # Process multi-label text fields
+        df["genres"] = df["listed_in"].apply(_split_multi)
+        df["countries"] = df["country"].apply(_split_multi)
+        df["cast_list"] = df["cast"].apply(_split_multi)
+
+        # Simple derived stats (useful for interpretability)
+        df["n_genres"] = df["genres"].apply(len)
+        df["n_countries"] = df["countries"].apply(len)
+        df["n_cast"] = df["cast_list"].apply(len)
+
+        # Title ID
+        df["title_id"] = [
+            _stable_title_id(platform, t, int(y) if pd.notna(y) else None, ty)
+            for t, y, ty in zip(df["title"], df["release_year"], df["type"])
+        ]
+
+        # Keep canonical columns only (and in a stable order)
+        keep = [
+            "title_id", "platform", "title", "type", "release_year",
+            "duration_mins", "duration_seasons",
+            "listed_in", "country", "cast",
+            "genres", "countries", "cast_list",
+            "n_genres", "n_countries", "n_cast",
+        ]
+        frames.append(df[keep])
+
+    catalog = pd.concat(frames, ignore_index=True)
+
+    # Defensive: remove exact duplicates by title_id if any (rare but possible)
+    catalog = catalog.drop_duplicates(subset=["title_id"]).reset_index(drop=True)
+
     return catalog
 
 
-def load_raw_csvs(raw_dir: str | Path) -> dict[str, pd.DataFrame]:
-    raw_dir = Path(raw_dir)
-    mapping = {
-        "Netflix": raw_dir / "netflix_titles.csv",
-        "Amazon Prime": raw_dir / "amazon_prime_titles.csv",
-        "Disney+": raw_dir / "disney_plus_titles.csv",
-    }
-    dfs = {}
-    for platform, path in mapping.items():
-        if not path.exists():
-            raise FileNotFoundError(f"Missing file for {platform}: {path}")
-        dfs[platform] = pd.read_csv(path)
-    return dfs
+def save_catalog_parquet(catalog: pd.DataFrame, out_path: Path) -> None:
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    catalog.to_parquet(out_path, index=False)
