@@ -1,11 +1,12 @@
 # src/feature_engineering.py
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, is_dataclass, asdict
 from typing import Iterable
+from pathlib import Path
 import pandas as pd
 import numpy as np
-
+import json
 
 @dataclass(frozen=True)
 class CoreFeatureConfig:
@@ -21,10 +22,42 @@ def _top_k_from_lists(series: pd.Series, k: int) -> list[str]:
     """series contains lists. Return top-k most frequent tokens."""
     counts = {}
     for items in series:
+        if items is None:
+            continue
+        try:
+            if len(items) == 0:
+                continue
+        except TypeError:
+            continue
         for x in items:
             counts[x] = counts.get(x, 0) + 1
     top = sorted(counts.items(), key=lambda t: t[1], reverse=True)[:k]
     return [t[0] for t in top]
+
+
+def _as_list(x) -> list:
+    # Handles list, tuple, numpy array, pyarrow list scalars, NaN/None
+    if x is None:
+        return []
+    # pandas NA / numpy nan
+    try:
+        if pd.isna(x):
+            return []
+    except Exception:
+        pass
+
+    if isinstance(x, list):
+        return x
+    if isinstance(x, tuple):
+        return list(x)
+    if isinstance(x, np.ndarray):
+        return x.tolist()
+
+    # pyarrow sometimes returns objects that behave like sequences
+    try:
+        return list(x)
+    except Exception:
+        return []
 
 
 def _multi_hot(series: pd.Series, vocab: list[str], prefix: str, other_label: str | None = "Other") -> pd.DataFrame:
@@ -38,7 +71,8 @@ def _multi_hot(series: pd.Series, vocab: list[str], prefix: str, other_label: st
         data[f"{prefix}{other_label}"] = np.zeros(len(series), dtype=np.int8)
 
     for i, items in enumerate(series):
-        if not items:
+        items = _as_list(items)
+        if len(items) == 0:
             continue
         hit_other = False
         for x in items:
@@ -68,6 +102,13 @@ def build_core_feature_matrix(catalog: pd.DataFrame, cfg: CoreFeatureConfig = Co
 
     # Index by title_id for stable alignment
     df = df.set_index("title_id", drop=False)
+
+    df["genres"] = df["genres"].apply(_as_list)
+    df["countries"] = df["countries"].apply(_as_list)
+    
+    # if you use cast_list in core later, coerce it too
+    if "cast_list" in df.columns:
+        df["cast_list"] = df["cast_list"].apply(_as_list)
 
     # Top vocab selection across *all platforms*
     top_genres = _top_k_from_lists(df["genres"], cfg.top_genres)
@@ -110,7 +151,7 @@ def build_core_feature_matrix(catalog: pd.DataFrame, cfg: CoreFeatureConfig = Co
     meta = {
         "top_genres": top_genres,
         "top_countries": top_countries,
-        "config": cfg,
+        "config": asdict(cfg),
     }
     return X_core, meta
 
@@ -129,6 +170,8 @@ def build_cast_feature_matrix(catalog: pd.DataFrame, cfg: CastFeatureConfig = Ca
     """
     df = catalog.copy().set_index("title_id", drop=False)
 
+    df["cast_list"] = df["cast_list"].apply(_as_list)
+
     top_actors = _top_k_from_lists(df["cast_list"], cfg.top_actors)
     X_cast = _multi_hot(df["cast_list"], top_actors, prefix="Actor:", other_label=None)
 
@@ -143,6 +186,28 @@ def build_cast_feature_matrix(catalog: pd.DataFrame, cfg: CastFeatureConfig = Ca
 
     meta = {
         "top_actors": top_actors,
-        "config": cfg,
+        "config": asdict(cfg),
     }
     return X_cast, meta
+
+# Helper save/load utilities functions for feature bundles (matrix + meta) 
+# to enable reproducibility & interpretability of features used in downstream analyses
+def _jsonable(x):
+    if is_dataclass(x):
+        return asdict(x)
+    if isinstance(x, (list, dict, str, int, float, bool)) or x is None:
+        return x
+    return str(x)
+
+def save_feature_bundle(X: pd.DataFrame, meta: dict, out_dir: Path, name: str) -> None:
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    X_path = out_dir / f"{name}.parquet"
+    meta_path = out_dir / f"{name}_meta.json"
+
+    X.to_parquet(X_path, index=True)
+
+    meta_clean = {k: _jsonable(v) for k, v in meta.items()}
+    with open(meta_path, "w") as f:
+        json.dump(meta_clean, f, indent=2)

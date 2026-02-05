@@ -5,11 +5,17 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "streaming_similarity"
 version = "0.1.0"
-requires-python = ">=3.10"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "pandas",
+  "numpy",
+  "pyarrow",
+  "scikit-learn",
+]
 
 [tool.setuptools]
-package-dir = {"" = "."}
+package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
-where = ["."]
+where = ["src"]
 include = ["src*"]

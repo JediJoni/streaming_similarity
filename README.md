@@ -1,20 +1,23 @@
 # Streaming Content Similarity & Genre Clustering
 
-This project builds on the cleaned catalog metadata produced in the
-[`streaming_analysis`](../streaming_analysis) project.
+Build an interpretable, metadata-driven view of **content similarity** across streaming platforms.
+This repo turns a cleaned title catalog into feature matrices (genres, countries, type, year, duration, cast size)
+and runs clustering to reveal coarse “content archetypes”.
 
-The goal is to explore **content similarity** and **genre structure**
-across streaming platforms using interpretable, metadata-driven features
-(genres, countries, cast overlap, runtime, etc.).
+## What this does
 
-## Project focus
+1. **Build a unified catalog** from raw platform exports  
+2. **Engineer interpretable features** (multi-hot + binned numeric signals)
+3. **Cluster titles** (k-means on cosine distance)
+4. **Save artifacts** so results are reproducible
 
-- Feature engineering from multi-label categorical metadata
-- Interpretable similarity measures (before black-box embeddings)
-- Genre diversity and clustering structure
-- Foundations for a future content-based recommender system
+## Quickstart
 
-## Status
+From the repo root:
 
-🛠️ Initial setup  
-🛠️ Feature design in progress
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+python -m src.pipeline
